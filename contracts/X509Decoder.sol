@@ -83,7 +83,6 @@ contract X509Parser is Ownable {
   public
   {
     Certificate memory certificate;
-    bytes32 certId;
     uint node1;
     uint node2;
     uint node3;
@@ -91,20 +90,36 @@ contract X509Parser is Ownable {
 
     certificate.parentId = keccak256(parentPubKey);
     certificate.timestamp = uint40(block.timestamp);
+    
+    // Follow along with parsing the X.509 cert at
+    // https://www.rfc-editor.org/rfc/rfc5280#section-4.1
 
+    // Certificate root
     node1 = cert.root();
+    // tbsCertificate (TBSCertificate)
     node1 = cert.firstChildOf(node1);
+    // |-- Version
     node2 = cert.firstChildOf(node1);
-    if (cert[NodePtr.ixs(node2)] == 0xa0) {
-      node2 = cert.nextSiblingOf(node2);
-    }
+    console.log("Version %d", NodePtr.ixl(node2));
+    console.log("Bytes at version");
+    console.logBytes(cert.bytesAt(node2));
+    console.logBytes(cert.allBytesAt(node2));
+    
+    // If ENUMERATED type is read, skip the version section and find the next sibling
+    require(cert[NodePtr.ixs(node2)] == 0xa0, "Enumerated type expected for version field");
+    // TODO: Maybe add enumAt as: cert.uintAt(cert.firstChildOf(node))
+    console.log("X.509 Version is %d", cert.uintAt(cert.firstChildOf(node2)) + 1);
+    node2 = cert.nextSiblingOf(node2);
+    
     // Extract serial number
     certificate.serialNumber = uint160(cert.uintAt(node2));
-    console.log("Serial number:");
+    console.log("Serial number (often 1 for Android TEEs):");
     console.logBytes20(bytes20(certificate.serialNumber));
-
+    
+    // signature node (AlgorithmIdentifier)
     node2 = cert.nextSiblingOf(node2);
     node2 = cert.firstChildOf(node2);
+    // signatureValue node (BIT STRING)
     node3 = cert.nextSiblingOf(node1);
     node3 = cert.nextSiblingOf(node3);
     
@@ -113,11 +128,35 @@ contract X509Parser is Ownable {
     console.logBytes32(cert.bytes32At(node2));
     require(address(algAddress) != address(0x0), "Algorithm unknown");
     
-    // Verify signature
-    console.log("Len node1: %d", cert.allBytesAt(node1).length);
-    console.log("Len node3: %d", cert.allBytesAt(node3).length);
+    // Read signature details
+    console.log("Length of cert: %d", cert.allBytesAt(node1).length);
+    
+    // Parse the signature bit string
+    // NOTE: ECDSA requires a specific parsing structure that RSA and
+    // some other algorithms do not have.
+    // In the future, the signature parameters could be parsed in an algorithm-agnostic way.
+    node2 = cert.rootOfBitStringAt(node3);
+    node2 = cert.firstChildOf(node2);
+    console.log("rs_0");
+    console.logBytes(cert.uintBytesAt(node2));
+    console.log("rs_1");
+    console.logBytes(cert.uintBytesAt(cert.nextSiblingOf(node2)));
+    
+    console.log("Cert bytes");
+    console.logBytes(cert.allBytesAt(node1));
+    console.log("sig bytes");
+    console.logBytes(bytes.concat(cert.uintBytesAt(node2), cert.uintBytesAt(cert.nextSiblingOf(node2))));
+    console.log("pub key bytes");
+    console.logBytes(parentPubKey);
+    
     // verify(pubkey, data, signature)
-    require(algAddress.verify(parentPubKey, cert.allBytesAt(node1), cert.bytesAt(node3)), "Signature doesnt match");
+    {
+    require(algAddress.verify(parentPubKey, cert.allBytesAt(node1),
+        bytes.concat(cert.uintBytesAt(node2), cert.uintBytesAt(cert.nextSiblingOf(node2)))),
+    "Signature doesn't match");
+    }
+    
+    console.log("Verification passed!");
 
     node1 = cert.firstChildOf(node1);
     node1 = cert.nextSiblingOf(node1);
@@ -136,6 +175,7 @@ contract X509Parser is Ownable {
 
     node1 = cert.nextSiblingOf(node1);
     node1 = cert.nextSiblingOf(node1);
+    bytes32 certId;
     // Get public key and calculate certId from it
     certId = cert.keccakOfAllBytesAt(node1);
     // Cert must not already exist

@@ -4,6 +4,8 @@
 pragma solidity ^0.8.17;
 
 import "@ensdomains/ens-contracts/contracts/dnssec-oracle/BytesUtils.sol";
+// Debugging
+import "hardhat/console.sol";
 
 library NodePtr {
   // Unpack first byte index
