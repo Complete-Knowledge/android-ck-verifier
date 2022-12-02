@@ -137,6 +137,17 @@ library Asn1Decode {
   }
 
   /*
+   * @dev Extract value of node from DER-encoded structure
+   * @param der The der-encoded ASN1 structure
+   * @param ptr Points to the indices of the current node
+   * @return Enum value of node
+   */
+  function enumAt(bytes memory der, uint ptr) internal pure returns (uint) {
+    require(der[ptr.ixs()] == 0x0a, "Not type ENUMERATED");
+    return uint8(der[ptr.ixf()]);
+  }
+
+  /*
    * @dev Extract value of a positive integer node from DER-encoded structure
    * @param der The DER-encoded ASN1 structure
    * @param ptr Points to the indices of the current node

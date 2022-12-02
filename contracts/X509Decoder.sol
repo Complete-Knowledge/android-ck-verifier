@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
-// Originally from
-// https://github.com/JonahGroendal/ethereum-datetime/blob/master/contracts/DateTime.sol
+// Adapted from
+// https://github.com/JonahGroendal/x509-forest-of-trust/blob/master/contracts/X509ForestOfTrust.sol
 pragma solidity ^0.8.17;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "./Asn1Decode.sol";
+import "@ensdomains/ens-contracts/contracts/dnssec-oracle/BytesUtils.sol";
 import "@ensdomains/ens-contracts/contracts/dnssec-oracle/algorithms/Algorithm.sol";
+import "./Asn1Decode.sol";
 import "./ENSNamehash.sol";
 import "./DateTime.sol";
 
@@ -25,7 +26,9 @@ contract X509Parser is Ownable {
   bytes10 constant private OID_NAME_CONSTRAINTS   = 0x551d1e00000000000000;
   bytes10 constant private OID_KEY_USAGE          = 0x551d0f00000000000000;
   bytes10 constant private OID_EXTENDED_KEY_USAGE = 0x551d2500000000000000;
-  bytes10 private OID_CAN_SIGN_HTTP_EXCHANGES     = 0x2b06010401d679020116; // Not constant because spec may change
+  
+  // Android key attestation OIDs
+  bytes10 constant private OID_ANDROID_KEY_STORE  = 0x2b06010401d679020111;
 
   constructor(address ecdsaWithSHA256, address _dateTime) {
     // sha256WithRSAEncryption defined in RFC-8017
@@ -58,10 +61,16 @@ contract X509Parser is Ownable {
                               // cert in a valid certification path.
     KeyUsage keyUsage;
     ExtKeyUsage extKeyUsage;
-    bool sxg;                 // canSignHttpExchanges extension is present.
-    bytes32 extId;            // keccak256 of extensions field for further validation.
-                              // Equal to 0x0 unless a critical extension was found but not parsed.
-                              // This should always be checked on leaf certificates
+  }
+  
+  /**
+   * @dev Add a X.509 certificate to an existing tree/chain
+   * @param cert A DER-encoded X.509 certificate
+   * @param certParams The parent certificate's DER-encoded public key
+   */
+  struct CertParams {
+    bytes parentPubKey;
+    address proverAddress;
   }
 
   mapping (bytes32 => Certificate) private certs;     // certId => cert  (certId is keccak256(pubKey))
@@ -77,9 +86,9 @@ contract X509Parser is Ownable {
   /**
    * @dev Add a X.509 certificate to an existing tree/chain
    * @param cert A DER-encoded X.509 certificate
-   * @param parentPubKey The parent certificate's DER-encoded public key
+   * @param certParams A description of the certificate and intended address to verify
    */
-  function addCert(bytes memory cert, bytes memory parentPubKey)
+  function addCert(bytes memory cert, CertParams memory certParams)
   public
   {
     Certificate memory certificate;
@@ -88,7 +97,7 @@ contract X509Parser is Ownable {
     uint node3;
     uint node4;
 
-    certificate.parentId = keccak256(parentPubKey);
+    certificate.parentId = keccak256(certParams.parentPubKey);
     certificate.timestamp = uint40(block.timestamp);
     
     // Follow along with parsing the X.509 cert at
@@ -105,10 +114,8 @@ contract X509Parser is Ownable {
     console.logBytes(cert.bytesAt(node2));
     console.logBytes(cert.allBytesAt(node2));
     
-    // If ENUMERATED type is read, skip the version section and find the next sibling
-    require(cert[NodePtr.ixs(node2)] == 0xa0, "Enumerated type expected for version field");
-    // TODO: Maybe add enumAt as: cert.uintAt(cert.firstChildOf(node))
     console.log("X.509 Version is %d", cert.uintAt(cert.firstChildOf(node2)) + 1);
+    require(cert.uintAt(cert.firstChildOf(node2)) + 1 == 3, "Certificate must be X.509 Version 3");
     node2 = cert.nextSiblingOf(node2);
     
     // Extract serial number
@@ -132,9 +139,8 @@ contract X509Parser is Ownable {
     console.log("Length of cert: %d", cert.allBytesAt(node1).length);
     
     // Parse the signature bit string
-    // NOTE: ECDSA requires a specific parsing structure that RSA and
-    // some other algorithms do not have.
-    // In the future, the signature parameters could be parsed in an algorithm-agnostic way.
+    // NOTE: ECDSA requires a specific parsing structure. In the future,
+    // the signature parameters could be parsed in an algorithm-agnostic way.
     node2 = cert.rootOfBitStringAt(node3);
     node2 = cert.firstChildOf(node2);
     console.log("rs_0");
@@ -147,11 +153,11 @@ contract X509Parser is Ownable {
     console.log("sig bytes");
     console.logBytes(bytes.concat(cert.uintBytesAt(node2), cert.uintBytesAt(cert.nextSiblingOf(node2))));
     console.log("pub key bytes");
-    console.logBytes(parentPubKey);
+    console.logBytes(certParams.parentPubKey);
     
     // verify(pubkey, data, signature)
     {
-    require(algAddress.verify(parentPubKey, cert.allBytesAt(node1),
+    require(algAddress.verify(certParams.parentPubKey, cert.allBytesAt(node1),
         bytes.concat(cert.uintBytesAt(node2), cert.uintBytesAt(cert.nextSiblingOf(node2)))),
     "Signature doesn't match");
     }
@@ -163,17 +169,20 @@ contract X509Parser is Ownable {
     node1 = cert.nextSiblingOf(node1);
     node1 = cert.nextSiblingOf(node1);
     node1 = cert.nextSiblingOf(node1);
-
+    
+    // Now at validity (Validity)
     node2 = cert.firstChildOf(node1);
-    // Check validNotBefore
+    // Check notBefore
     certificate.validNotBefore = uint40(toTimestamp(cert.bytesAt(node2)));
     require(certificate.validNotBefore <= block.timestamp, "Now is before validNotBefore");
     node2 = cert.nextSiblingOf(node2);
-    // Check validNotAfter
+    // Check notAfter
     certificate.validNotAfter = uint40(toTimestamp(cert.bytesAt(node2)));
     require(block.timestamp <= certificate.validNotAfter, "Now is after validNotAfter");
 
+    // subject (Name)
     node1 = cert.nextSiblingOf(node1);
+    // subjectPublicKeyInfo (SubjectPublicKeyInfo)
     node1 = cert.nextSiblingOf(node1);
     bytes32 certId;
     // Get public key and calculate certId from it
@@ -197,6 +206,7 @@ contract X509Parser is Ownable {
 
     // Parse extensions
     if (cert[NodePtr.ixs(node1)] == 0xa3) {
+      console.log("Reading extension");
       node1 = cert.firstChildOf(node1);
       node2 = cert.firstChildOf(node1);
       bytes10 oid;
@@ -204,6 +214,8 @@ contract X509Parser is Ownable {
       while (Asn1Decode.isChildOf(node2, node1)) {
         node3 = cert.firstChildOf(node2);
         oid = bytes10(cert.bytes32At(node3)); // Extension oid
+        console.log("OID:");
+        console.logBytes10(oid);
         node3 = cert.nextSiblingOf(node3);
         // Check if extension is critical
         isCritical = false;
@@ -251,6 +263,7 @@ contract X509Parser is Ownable {
           node3 = cert.rootOfOctetStringAt(node3);
           bytes3 v = bytes3(cert.bytes32At(node3)); // The encoded bitstring value
           certificate.keyUsage.bits = ((uint16(uint8(v[1])) << 8) + uint16(uint8(v[2]))) >> 7;
+          console.log("Key usage"); 
         }
         else if (oid == OID_EXTENDED_KEY_USAGE) {
           certificate.extKeyUsage.present = true;
@@ -270,22 +283,70 @@ contract X509Parser is Ownable {
           }
           certificate.extKeyUsage.oids = oids;
         }
-        else if (oid == OID_CAN_SIGN_HTTP_EXCHANGES) {
-          certificate.sxg = true;
+        else if (oid == OID_ANDROID_KEY_STORE) {
+          node3 = cert.rootOfOctetStringAt(node3);
+          
+          // Follow along at
+          // https://developer.android.com/training/articles/security-key-attestation#certificate_schema
+          
+          // attestationVersion
+          node4 = cert.firstChildOf(node3);
+          console.log("Attestation version: %d", cert.uintAt(node4));
+          require(cert.uintAt(node4) == 200, "Attestation version must be 200 for this contract");
+          
+          // attestationSecurityLevel
+          node4 = cert.nextSiblingOf(node4);
+          console.log("KeyStore version: %d", cert.enumAt(node4));
+          require(cert.enumAt(node4) >= 1, "Software KeyStore not allowed; a hardware TEE is required.");
+          
+          // keyMintVersion
+          node4 = cert.nextSiblingOf(node4);
+          console.log("KeyMint version: %d", cert.uintAt(node4));
+          require(cert.uintAt(node4) == 200, "KeyMint version must be 200 for this contract");
+          
+          // keyMintSecurityLevel
+          node4 = cert.nextSiblingOf(node4);
+          console.log("KeyMint security level: %d", cert.enumAt(node4));
+          require(cert.enumAt(node4) >= 1, "Key must be stored in a hardware TEE");
+          
+          // attestationChallenge (OCTET_STRING)
+          node4 = cert.nextSiblingOf(node4);
+          console.log("Attestation challenge:");
+          bytes memory sigBytes = cert.bytesAt(node4);
+          console.log("Byte length: %d", sigBytes.length);
+          bytes32 r = BytesUtils.readBytes32(sigBytes, 0);
+          bytes32 s = BytesUtils.readBytes32(sigBytes, 32);
+          uint8 v = BytesUtils.readUint8(sigBytes, 64);
+          //console.log("r: %d, s: %d, v: %d", r, s, v);
+          console.logBytes32(r);
+          console.logBytes32(s);
+          console.logUint(v);
+          address signer = ecrecover(keccak256("\x19Ethereum Signed Message:\n23Android CK Verification"), v, r, s);
+          require(certParams.proverAddress == signer, "Invalid signature for intended address");
+          
+          //console.log("Len %d %d %d", uint8(cert[NodePtr.ixs(node3)]), uint8(cert[NodePtr.ixf(node3)]), uint8(cert[NodePtr.ixl(node3)]));
+          /*uint len;
+          while (Asn1Decode.isChildOf(node4, node3)) {
+            bytes10 oid = bytes10(cert.bytes32At(node4));
+            console.log("Android OID:");
+            console.logBytes10(oid);
+            node4 = cert.nextSiblingOf(node4);
+          }
+          console.log("Completed");*/
         }
-        else if (oid == OID_NAME_CONSTRAINTS) {
-          // Name constraints not allowed.
-          require(false, "Name constraints extension not supported");
-        }
+        /*
+        Don't save any extra data on-chain
         else if (isCritical && certificate.extId == bytes32(0)) {
           // Note: unrecognized critical extensions are allowed.
           // Further validation of certificate is needed if extId != bytes32(0).
           // Save hash of extensions
           certificate.extId = cert.keccakOfAllBytesAt(node1);
         }
+        */
         node2 = cert.nextSiblingOf(node2);
       }
     }
+    return;
 
     certs[certId] = certificate;
 
@@ -298,43 +359,6 @@ contract X509Parser is Ownable {
     // bit in the key usage extension MUST NOT be asserted.
     if (!certificate.cA)
       require(certificate.keyUsage.bits & 8 != 8, "cA boolean is not asserted and keyCertSign bit is asserted");
-  }
-
-  /**
-   * @dev The return values of this function are used to proveOwnership() of a
-   *      certificate that exists in the certs mapping.
-   * @return Some unique bytes to be signed
-   * @return The block number used to create the first return value
-   */
-  function signThis()
-  external view returns (bytes memory, uint)
-  {
-    return ( abi.encodePacked(msg.sender, blockhash(block.number - 1)), block.number -1 );
-  }
-
-  /**
-   * @dev An account calls this method to prove ownership of a certificate.
-   *      If successful, certs[certId].owner will be set to caller's address.
-   * @param pubKey The target certificate's public key
-   * @param signature signThis()[0] signed with certificate's private key
-   * @param blockNumber The value of signThis()[1] (must be > block.number - 256)
-   * @param sigAlg The OID of the algorithm used to sign `signature`
-   */
-  function proveOwnership(bytes calldata pubKey, bytes calldata signature, uint blockNumber, bytes32 sigAlg)
-  external
-  {
-    bytes32 certId = keccak256(pubKey);
-    bytes memory message = abi.encodePacked(msg.sender, blockhash(blockNumber));
-
-    emit CertClaimed(certId, msg.sender);
-
-    // Only accept proof if it's less than 256 blocks old
-    // This is the most time I can give since blockhash() can only return the 256 most recent
-    require(block.number - blockNumber < 256, "Signature too old");
-    // Verify signature, which proves ownership
-    require(algs[sigAlg].verify(pubKey, message, signature), "Signature doesnt match");
-
-    certs[certId].owner = msg.sender;
   }
 
   function rootOf(bytes32 certId) external view returns (bytes32) {
@@ -369,10 +393,6 @@ contract X509Parser is Ownable {
     return certs[certId].validNotAfter;
   }
 
-  function sxg(bytes32 certId) external view returns (bool) {
-    return certs[certId].sxg;
-  }
-
   function basicConstraints(bytes32 certId) external view returns (bool, uint8) {
     return (certs[certId].cA, certs[certId].pathLenConstraint);
   }
@@ -401,14 +421,6 @@ contract X509Parser is Ownable {
 
   function extKeyUsageCritical(bytes32 certId) external view returns (bool) {
     return certs[certId].extKeyUsage.critical;
-  }
-
-  function unparsedCriticalExtensionPresent(bytes32 certId) external view returns (bool) {
-    return (certs[certId].extId != bytes32(0));
-  }
-
-  function extId(bytes32 certId) external view returns (bytes32) {
-    return certs[certId].extId;
   }
 
   function toCertIdsLength(bytes32 _hash) external view returns (uint) {
@@ -442,10 +454,6 @@ contract X509Parser is Ownable {
   function setAlg(bytes32 oid, address alg) external onlyOwner {
     algs[oid] = Algorithm(alg);
     emit AlgSet(oid, alg);
-  }
-
-  function setSxgOid(bytes32 sxgOid) external onlyOwner {
-    OID_CAN_SIGN_HTTP_EXCHANGES = bytes10(sxgOid);
   }
 }
 
