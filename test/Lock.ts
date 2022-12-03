@@ -5,6 +5,14 @@ import { ethers } from "hardhat";
 import { randomBytes } from "crypto";
 
 describe("X509Decoder", function () {
+  
+  async function setUp() {
+    console.log("Setting up");
+    // Set the block timestamp correctly so that the certificates used in these tests
+    // are still valid (in the context of these tests) in the future
+    await network.provider.send("evm_setNextBlockTimestamp", [1670013028]);
+  }
+  
   // We define a fixture to reuse the same setup in every test.
   // We use loadFixture to run this setup once, snapshot that state,
   // and reset Hardhat Network to that snapshot in every test.
