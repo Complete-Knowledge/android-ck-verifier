@@ -9,6 +9,7 @@ import "hardhat/console.sol";
 
 library NodePtr {
   // Unpack first byte index
+  // (The current absolute byte offset)
   function ixs(uint self) internal pure returns (uint) {
     return uint80(self);
   }
@@ -28,6 +29,8 @@ library NodePtr {
   }
 }
 
+// TODO: Remove console.log and change view to pure
+
 library Asn1Decode {
   using NodePtr for uint;
   using BytesUtils for bytes;
@@ -37,7 +40,7 @@ library Asn1Decode {
    * @param der The DER-encoded ASN1 structure
    * @return A pointer to the outermost node
    */
-  function root(bytes memory der) internal pure returns (uint) {
+  function root(bytes memory der) internal view returns (uint) {
   	return readNodeLength(der, 0);
   }
 
@@ -46,7 +49,7 @@ library Asn1Decode {
    * @param der The DER-encoded ASN1 structure
    * @return A pointer to the outermost node
    */
-  function rootOfBitStringAt(bytes memory der, uint ptr) internal pure returns (uint) {
+  function rootOfBitStringAt(bytes memory der, uint ptr) internal view returns (uint) {
     require(der[ptr.ixs()] == 0x03, "Not type BIT STRING");
     return readNodeLength(der, ptr.ixf()+1);
   }
@@ -56,7 +59,7 @@ library Asn1Decode {
    * @param der The DER-encoded ASN1 structure
    * @return A pointer to the outermost node
    */
-  function rootOfOctetStringAt(bytes memory der, uint ptr) internal pure returns (uint) {
+  function rootOfOctetStringAt(bytes memory der, uint ptr) internal view returns (uint) {
     require(der[ptr.ixs()] == 0x04, "Not type OCTET STRING");
     return readNodeLength(der, ptr.ixf());
   }
@@ -67,7 +70,7 @@ library Asn1Decode {
    * @param ptr Points to the indices of the current node
    * @return A pointer to the next sibling node
    */
-  function nextSiblingOf(bytes memory der, uint ptr) internal pure returns (uint) {
+  function nextSiblingOf(bytes memory der, uint ptr) internal view returns (uint) {
   	return readNodeLength(der, ptr.ixl()+1);
   }
 
@@ -77,7 +80,7 @@ library Asn1Decode {
    * @param ptr Points to the indices of the current node
    * @return A pointer to the first child node
    */
-  function firstChildOf(bytes memory der, uint ptr) internal pure returns (uint) {
+  function firstChildOf(bytes memory der, uint ptr) internal view returns (uint) {
   	require(der[ptr.ixs()] & 0x20 == 0x20, "Not a constructed type");
   	return readNodeLength(der, ptr.ixf());
   }
@@ -99,7 +102,7 @@ library Asn1Decode {
    * @param ptr Points to the indices of the current node
    * @return Value bytes of node
    */
-  function bytesAt(bytes memory der, uint ptr) internal pure returns (bytes memory) {
+  function bytesAt(bytes memory der, uint ptr) internal view returns (bytes memory) {
     return der.substring(ptr.ixf(), ptr.ixl()+1 - ptr.ixf());
   }
 
@@ -109,7 +112,7 @@ library Asn1Decode {
    * @param ptr Points to the indices of the current node
    * @return All bytes of node
    */
-  function allBytesAt(bytes memory der, uint ptr) internal pure returns (bytes memory) {
+  function allBytesAt(bytes memory der, uint ptr) internal view returns (bytes memory) {
     return der.substring(ptr.ixs(), ptr.ixl()+1 - ptr.ixs());
   }
 
@@ -119,7 +122,7 @@ library Asn1Decode {
    * @param ptr Points to the indices of the current node
    * @return Value bytes of node as bytes32
    */
-  function bytes32At(bytes memory der, uint ptr) internal pure returns (bytes32) {
+  function bytes32At(bytes memory der, uint ptr) internal view returns (bytes32) {
     return der.readBytesN(ptr.ixf(), ptr.ixl()+1 - ptr.ixf());
   }
 
@@ -129,7 +132,7 @@ library Asn1Decode {
    * @param ptr Points to the indices of the current node
    * @return Uint value of node
    */
-  function uintAt(bytes memory der, uint ptr) internal pure returns (uint) {
+  function uintAt(bytes memory der, uint ptr) internal view returns (uint) {
     require(der[ptr.ixs()] == 0x02, "Not type INTEGER");
     require(der[ptr.ixf()] & 0x80 == 0, "Not positive");
     uint len = ptr.ixl()+1 - ptr.ixf();
@@ -142,7 +145,7 @@ library Asn1Decode {
    * @param ptr Points to the indices of the current node
    * @return Enum value of node
    */
-  function enumAt(bytes memory der, uint ptr) internal pure returns (uint) {
+  function enumAt(bytes memory der, uint ptr) internal view returns (uint) {
     require(der[ptr.ixs()] == 0x0a, "Not type ENUMERATED");
     return uint8(der[ptr.ixf()]);
   }
@@ -153,7 +156,7 @@ library Asn1Decode {
    * @param ptr Points to the indices of the current node
    * @return Value bytes of a positive integer node
    */
-  function uintBytesAt(bytes memory der, uint ptr) internal pure returns (bytes memory) {
+  function uintBytesAt(bytes memory der, uint ptr) internal view returns (bytes memory) {
     require(der[ptr.ixs()] == 0x02, "Not type INTEGER");
     require(der[ptr.ixf()] & 0x80 == 0, "Not positive");
     uint valueLength = ptr.ixl()+1 - ptr.ixf();
@@ -163,11 +166,11 @@ library Asn1Decode {
       return der.substring(ptr.ixf(), valueLength);
   }
 
-  function keccakOfBytesAt(bytes memory der, uint ptr) internal pure returns (bytes32) {
+  function keccakOfBytesAt(bytes memory der, uint ptr) internal view returns (bytes32) {
     return der.keccak(ptr.ixf(), ptr.ixl()+1 - ptr.ixf());
   }
 
-  function keccakOfAllBytesAt(bytes memory der, uint ptr) internal pure returns (bytes32) {
+  function keccakOfAllBytesAt(bytes memory der, uint ptr) internal view returns (bytes32) {
     return der.keccak(ptr.ixs(), ptr.ixl()+1 - ptr.ixs());
   }
 
@@ -177,15 +180,50 @@ library Asn1Decode {
    * @param ptr Points to the indices of the current node
    * @return Value of bitstring converted to bytes
    */
-  function bitstringAt(bytes memory der, uint ptr) internal pure returns (bytes memory) {
+  function bitstringAt(bytes memory der, uint ptr) internal view returns (bytes memory) {
     require(der[ptr.ixs()] == 0x03, "Not type BIT STRING");
     // Only 00 padded bitstr can be converted to bytestr!
     require(der[ptr.ixf()] == 0x00);
     uint valueLength = ptr.ixl()+1 - ptr.ixf();
     return der.substring(ptr.ixf()+1, valueLength-1);
   }
+  
+  function readTag(bytes memory der, uint ptr) internal view returns (uint id, uint childPtr) {
+    uint loc = ptr.ixs();
+    uint8 b = uint8(der[loc]);
+    if ((b & 0x1f) == 0x1f) {
+      // Long form
+      return readLongForm(der, ptr);
+    }
+    // Short form
+    require(((b & 0xa0) == 0xa0), "readTag: Unsupported type");
+    id = b & 0x1f;
+    // Read length octet
+    // TODO: Support definite/long length
+    uint len = uint8(der[loc + 1]);
+    childPtr = NodePtr.getPtr(loc, loc + 2, loc + 2 + len - 1);
+  }
+  
+  function readLongForm(bytes memory der, uint ptr) internal view returns (uint id, uint ix) {
+    require((der[ptr.ixs()] & 0x1f) == 0x1f, "Not long form");
+    // Next two bytes denote the tag
+    uint objPtr = ptr.ixs() + 1;
+    uint8 secondOctet = uint8(der[objPtr]);
+    bool more = (secondOctet & 0x80) != 0;
+    id = secondOctet & 0x7f;
+    if (more) {
+      id = id << 7;
+      id = id | (uint8(der[objPtr + 1]) & 0x7f);
+      objPtr++;
+    }
+    console.log("Ptr: %d", objPtr);
+    // TODO: Handle long form for length here?
+    uint len = uint8(der[objPtr + 1]);
+    console.log("Len: %d", len);
+    ix = NodePtr.getPtr(ptr.ixs(), objPtr + 2, objPtr + 2 + len - 1);
+  }
 
-  function readNodeLength(bytes memory der, uint ix) private pure returns (uint) {
+  function readNodeLength(bytes memory der, uint ix) private view returns (uint) {
     uint length;
     uint80 ixFirstContentByte;
     uint80 ixLastContentByte;
@@ -199,8 +237,9 @@ library Asn1Decode {
         length = der.readUint8(ix+2);
       else if (lengthbytesLength == 2)
         length = der.readUint16(ix+2);
-      else
+      else {
         length = uint(der.readBytesN(ix+2, lengthbytesLength) >> (32-lengthbytesLength)*8);
+      }
   		ixFirstContentByte = uint80(ix+2+lengthbytesLength);
   		ixLastContentByte = uint80(ixFirstContentByte + length -1);
     }

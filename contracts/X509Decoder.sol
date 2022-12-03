@@ -184,6 +184,8 @@ contract X509Parser is Ownable {
     node1 = cert.nextSiblingOf(node1);
     // subjectPublicKeyInfo (SubjectPublicKeyInfo)
     node1 = cert.nextSiblingOf(node1);
+    
+    /*
     bytes32 certId;
     // Get public key and calculate certId from it
     certId = cert.keccakOfAllBytesAt(node1);
@@ -195,6 +197,7 @@ contract X509Parser is Ownable {
 
     // Add reference from sha256 fingerprint
     toCertId[sha256(cert)] = certId;
+    */
 
     node1 = cert.nextSiblingOf(node1);
 
@@ -210,7 +213,7 @@ contract X509Parser is Ownable {
       node1 = cert.firstChildOf(node1);
       node2 = cert.firstChildOf(node1);
       bytes10 oid;
-      bool isCritical;
+      //bool isCritical;
       while (Asn1Decode.isChildOf(node2, node1)) {
         node3 = cert.firstChildOf(node2);
         oid = bytes10(cert.bytes32At(node3)); // Extension oid
@@ -218,12 +221,13 @@ contract X509Parser is Ownable {
         console.logBytes10(oid);
         node3 = cert.nextSiblingOf(node3);
         // Check if extension is critical
-        isCritical = false;
+        /*isCritical = false;
         if (cert[NodePtr.ixs(node3)] == 0x01) { // If type is bool
           if (cert[NodePtr.ixf(node3)] != 0x00) // If not false
             isCritical = true;
           node3 = cert.nextSiblingOf(node3);
-        }
+        }*/
+        /*
         if (oid == OID_SUBJECT_ALT_NAME) {
           // Add references from names
           node3 = cert.rootOfOctetStringAt(node3);
@@ -283,7 +287,8 @@ contract X509Parser is Ownable {
           }
           certificate.extKeyUsage.oids = oids;
         }
-        else if (oid == OID_ANDROID_KEY_STORE) {
+        */
+        if (oid == OID_ANDROID_KEY_STORE) {
           node3 = cert.rootOfOctetStringAt(node3);
           
           // Follow along at
@@ -311,28 +316,56 @@ contract X509Parser is Ownable {
           
           // attestationChallenge (OCTET_STRING)
           node4 = cert.nextSiblingOf(node4);
-          console.log("Attestation challenge:");
           bytes memory sigBytes = cert.bytesAt(node4);
           console.log("Byte length: %d", sigBytes.length);
-          bytes32 r = BytesUtils.readBytes32(sigBytes, 0);
-          bytes32 s = BytesUtils.readBytes32(sigBytes, 32);
-          uint8 v = BytesUtils.readUint8(sigBytes, 64);
-          //console.log("r: %d, s: %d, v: %d", r, s, v);
-          console.logBytes32(r);
-          console.logBytes32(s);
-          console.logUint(v);
-          address signer = ecrecover(keccak256("\x19Ethereum Signed Message:\n23Android CK Verification"), v, r, s);
+          address signer = ecrecover(
+            keccak256("\x19Ethereum Signed Message:\n23Android CK Verification"),
+            // v
+            BytesUtils.readUint8(sigBytes, 64),
+            // r
+            BytesUtils.readBytes32(sigBytes, 0),
+            // s
+            BytesUtils.readBytes32(sigBytes, 32));
           require(certParams.proverAddress == signer, "Invalid signature for intended address");
           
-          //console.log("Len %d %d %d", uint8(cert[NodePtr.ixs(node3)]), uint8(cert[NodePtr.ixf(node3)]), uint8(cert[NodePtr.ixl(node3)]));
-          /*uint len;
-          while (Asn1Decode.isChildOf(node4, node3)) {
-            bytes10 oid = bytes10(cert.bytes32At(node4));
-            console.log("Android OID:");
-            console.logBytes10(oid);
+          // uniqueId OCTET_STRING - empty for non-system apps
+          node4 = cert.nextSiblingOf(node4);
+          
+          // softwareEnforced (AuthorizationList)
+          node3 = cert.nextSiblingOf(node4);
+          
+          // Read AuthorizationList sequence of OIDs
+          node4 = cert.firstChildOf(node3);
+          uint id = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+          do {
+            console.log("ixs: %d", NodePtr.ixs(node4));
+            (id, node4) = cert.readTag(node4);
+            if (id == 701) {
+              // Not created in the future
+              node4 = cert.firstChildOf(node4);
+              require(cert.uintAt(node4) / 1000 <= block.timestamp, "Certificate creation datetime in the future!");
+            } else if (id == 709) {
+              // attestationApplicationId
+              console.log("ID IN HERE");
+              node4 = cert.firstChildOf(node4);
+              require(keccak256(cert.bytesAt(node4))
+                == 0x0dba4f607b0913140a4b44135a0ae98acc128770d2cf9fa877c26637c277ef07,
+                "Created from an invalid application");
+            }
+            
+            console.log("id: %d", id);
+            console.log("it: %d %d", NodePtr.ixl(node4), NodePtr.ixl(node3));
+            if (NodePtr.ixl(node4) >= NodePtr.ixl(node3)) {
+              break;
+            }
+            // NOTE: The following line corrupts the .ixf and .ixl parts of the pointer
+            // because there is not always a valid length (e.g. for long tags)
+            // readTag only uses .ixs, so this is okay.
             node4 = cert.nextSiblingOf(node4);
-          }
-          console.log("Completed");*/
+          } while (true);
+          
+          // teeEnforced (AuthorizationList)
+          console.log("Completed");
         }
         /*
         Don't save any extra data on-chain
@@ -348,17 +381,9 @@ contract X509Parser is Ownable {
     }
     return;
 
-    certs[certId] = certificate;
-
     require(certs[certificate.parentId].cA, "Invalid parent cert");
 
-    // If intermediate cert, verify authority's pathLenConstraint
-    if (certificate.cA && certId != certificate.parentId)
-      require(certs[certificate.parentId].pathLenConstraint == uint8(0xff) || certs[certificate.parentId].pathLenConstraint > certificate.pathLenConstraint, "Invalid parent cert");
-    // RFC 5280: If the cA boolean is not asserted, then the keyCertSign
-    // bit in the key usage extension MUST NOT be asserted.
-    if (!certificate.cA)
-      require(certificate.keyUsage.bits & 8 != 8, "cA boolean is not asserted and keyCertSign bit is asserted");
+    // TODO: Handle 4.2.1.9. of RFC 5280 (cert constraints)
   }
 
   function rootOf(bytes32 certId) external view returns (bytes32) {
